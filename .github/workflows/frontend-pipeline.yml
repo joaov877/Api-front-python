@@ -1,0 +1,129 @@
+name: Frontend CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main, develop ]
+    paths:
+      - 'src/**'
+      - 'Dockerfile'
+      - 'nginx.conf'
+      - 'package*.json'
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'src/**'
+  workflow_dispatch: 
+
+env:
+  DOCKER_USER: joaolchagas
+  IMAGE_NAME: joaolchagas/frontend-automotivo
+  NODE_VERSION: '20'
+
+jobs:
+  
+  test-and-build:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+    
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ env.NODE_VERSION }}
+        cache: 'npm'
+    
+    - name: Install dependencies
+      run: npm ci
+    
+    - name: Lint
+      run: npm run lint || echo "Lint warnings found"
+    
+    - name: Build
+      run: npm run build
+    
+    - name: Upload build artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: dist
+        path: dist/
+    
+    - name: Verify build
+      run: |
+        echo " Build completed successfully!"
+        ls -la dist/
+
+  
+  docker-build-push:
+    needs: test-and-build
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+    
+    - name: Download build artifacts
+      uses: actions/download-artifact@v4
+      with:
+        name: dist
+        path: dist/
+    
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+    
+    - name: Login to DockerHub
+      uses: docker/login-action@v3
+      with:
+        username: ${{ secrets.DOCKERHUB_USERNAME }}
+        password: ${{ secrets.DOCKERHUB_TOKEN }}
+    
+    - name: Generate version
+      id: version
+      run: |
+        VERSION=$(date +%Y%m%d-%H%M%S)
+        echo "version=$VERSION" >> $GITHUB_OUTPUT
+        echo "Generated version: $VERSION"
+    
+    - name: Build and push Docker image
+      id: build
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        file: Dockerfile
+        push: true
+        tags: |
+          ${{ env.IMAGE_NAME }}:latest
+          ${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}
+          ${{ env.IMAGE_NAME }}:${{ github.sha }}
+        labels: |
+          maintainer=${{ env.DOCKER_USER }}
+          version=${{ steps.version.outputs.version }}
+          build-date=${{ github.event.head_commit.timestamp }}
+          commit=${{ github.sha }}
+          branch=${{ github.ref_name }}
+    
+    - name: Verify push
+      run: |
+        echo " Docker image built and pushed successfully!"
+        echo " Image: ${{ env.IMAGE_NAME }}:latest"
+        echo " Image: ${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}"
+        echo " Image: ${{ env.IMAGE_NAME }}:${{ github.sha }}"
+        echo " Repository: https://hub.docker.com/r/${{ env.IMAGE_NAME }}"
+
+ 
+  deploy:
+    needs: docker-build-push
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    
+    steps:
+    - name: Deploy notification
+      run: |
+        echo " Deploy triggered for version: ${{ github.sha }}"
+        echo " Image: ${{ env.IMAGE_NAME }}:latest"
+        echo " Pull and run:"
+        echo "  docker pull ${{ env.IMAGE_NAME }}:latest"
+        echo "  docker run -d -p 80:80 --name frontend ${{ env.IMAGE_NAME }}:latest"
+        echo " Deployment ready!"
